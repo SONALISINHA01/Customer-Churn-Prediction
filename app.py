@@ -1,156 +1,89 @@
-{
- "cells": [
-  {
-   "cell_type": "code",
-   "execution_count": null,
-   "id": "1c04d972-aa97-4ed6-8afc-c4a5dab29bac",
-   "metadata": {},
-   "outputs": [],
-   "source": [
-    "import streamlit as st\n",
-    "import pandas as pd\n",
-    "import networkx as nx\n",
-    "import torch\n",
-    "import matplotlib.pyplot as plt\n",
-    "from torch_geometric.nn import GCNConv\n",
-    "import torch.nn.functional as F\n",
-    "\n",
-    "# --- 1. DEFINE THE MODEL ARCHITECTURE ---\n",
-    "# (We must define the class so PyTorch knows what structure to load weights into)\n",
-    "class ChurnGNN(torch.nn.Module):\n",
-    "    def __init__(self):\n",
-    "        super().__init__()\n",
-    "        self.conv1 = GCNConv(3, 32)\n",
-    "        self.conv2 = GCNConv(32, 2)\n",
-    "\n",
-    "    def forward(self, data):\n",
-    "        x, edge_index = data.x, data.edge_index\n",
-    "        x = self.conv1(x, edge_index)\n",
-    "        x = F.relu(x)\n",
-    "        x = F.dropout(x, p=0.5, training=self.training)\n",
-    "        x = self.conv2(x, edge_index)\n",
-    "        return F.log_softmax(x, dim=1)\n",
-    "\n",
-    "# --- 2. LOAD THE SAVED SYSTEM ---\n",
-    "st.set_page_config(page_title=\"Churn Contagion Guard\", layout=\"wide\")\n",
-    "\n",
-    "@st.cache_resource # Caches the model so it loads only once!\n",
-    "def load_trained_system():\n",
-    "    try:\n",
-    "        # Load the checkpoint file\n",
-    "        checkpoint = torch.load('churn_system.pth')\n",
-    "        \n",
-    "        # Restore Data\n",
-    "        G = checkpoint['graph_G']\n",
-    "        df = checkpoint['data_df']\n",
-    "        \n",
-    "        # Restore Model\n",
-    "        model = ChurnGNN()\n",
-    "        model.load_state_dict(checkpoint['model_state'])\n",
-    "        model.eval() # Set to evaluation mode (no training)\n",
-    "        \n",
-    "        return model, G, df\n",
-    "        \n",
-    "    except FileNotFoundError:\n",
-    "        st.error(\"❌ File 'churn_system.pth' not found! Please run the notebook to generate it.\")\n",
-    "        return None, None, None\n",
-    "\n",
-    "model, G, df = load_trained_system()\n",
-    "\n",
-    "if model is not None:\n",
-    "    # --- 3. SIDEBAR CONTROLS ---\n",
-    "    st.sidebar.title(\"🔍 Contagion Inspector\")\n",
-    "    st.sidebar.markdown(\"Select a customer to visualize their hidden 'Risk Network'.\")\n",
-    "\n",
-    "    # Search box\n",
-    "    if 'customerID' in df.columns:\n",
-    "        all_users = df['customerID'].unique()\n",
-    "        selected_user = st.sidebar.selectbox(\"Search Customer ID:\", all_users)\n",
-    "    else:\n",
-    "        st.error(\"Dataframe missing customerID column.\")\n",
-    "        st.stop()\n",
-    "\n",
-    "    # --- 4. MAIN DASHBOARD ---\n",
-    "    st.title(\"🛡️ Dynamic Churn Prediction System\")\n",
-    "    st.markdown(\"### Model Status: 🟢 Pre-Trained & Ready\")\n",
-    "\n",
-    "    col1, col2 = st.columns([2, 1])\n",
-    "\n",
-    "    with col1:\n",
-    "        st.subheader(f\"Network Visualization for {selected_user}\")\n",
-    "        \n",
-    "        try:\n",
-    "            # Visualize Subgraph\n",
-    "            if selected_user in G:\n",
-    "                neighbors = list(G.neighbors(selected_user))\n",
-    "                sub_nodes = [selected_user] + neighbors\n",
-    "                sub_G = G.subgraph(sub_nodes)\n",
-    "                \n",
-    "                fig, ax = plt.subplots(figsize=(8, 6))\n",
-    "                \n",
-    "                # Colors: Gold (Target), Red (Churned), Green (Safe)\n",
-    "                colors = []\n",
-    "                for node in sub_G.nodes():\n",
-    "                    is_churned = df[df['customerID'] == node]['Churn'].values[0] == 1\n",
-    "                    if node == selected_user:\n",
-    "                        colors.append('gold')\n",
-    "                    elif is_churned:\n",
-    "                        colors.append('#ff4b4b') # Red\n",
-    "                    else:\n",
-    "                        colors.append('#90EE90') # Green\n",
-    "                \n",
-    "                pos = nx.spring_layout(sub_G, seed=42)\n",
-    "                nx.draw(sub_G, pos, with_labels=True, node_color=colors, node_size=1200, font_size=9, ax=ax, edge_color='gray')\n",
-    "                st.pyplot(fig)\n",
-    "            else:\n",
-    "                st.warning(\"This user has no hidden error connections in the graph.\")\n",
-    "                \n",
-    "        except Exception as e:\n",
-    "            st.error(f\"Visualization Error: {e}\")\n",
-    "\n",
-    "    with col2:\n",
-    "        st.subheader(\"⚠️ Risk Analysis\")\n",
-    "        \n",
-    "        if selected_user in G:\n",
-    "            risk_score = len([n for n in neighbors if df[df['customerID'] == n]['Churn'].values[0] == 1])\n",
-    "            total_neighbors = len(neighbors)\n",
-    "            \n",
-    "            st.metric(label=\"Hidden Connections\", value=total_neighbors)\n",
-    "            st.metric(label=\"Infected Neighbors\", value=risk_score, delta_color=\"inverse\")\n",
-    "            \n",
-    "            if risk_score > 0:\n",
-    "                st.error(f\"**ALERT:** {selected_user} is linked to {risk_score} churned users.\")\n",
-    "                st.button(f\"🚀 Deploy Retention Offer\")\n",
-    "            else:\n",
-    "                st.success(\"User is in a safe cluster.\")\n",
-    "        else:\n",
-    "            st.info(\"No risk data available for this user.\")\n",
-    "\n",
-    "    # --- 5. EXPLANATION ---\n",
-    "    st.markdown(\"---\")\n",
-    "    st.info(\"ℹ️ **System Info:** This dashboard is loading a pre-trained Graph Neural Network from `churn_system.pth`. No training is happening in real-time.\")"
-   ]
-  }
- ],
- "metadata": {
-  "kernelspec": {
-   "display_name": "Python 3 (ipykernel)",
-   "language": "python",
-   "name": "python3"
-  },
-  "language_info": {
-   "codemirror_mode": {
-    "name": "ipython",
-    "version": 3
-   },
-   "file_extension": ".py",
-   "mimetype": "text/x-python",
-   "name": "python",
-   "nbconvert_exporter": "python",
-   "pygments_lexer": "ipython3",
-   "version": "3.12.3"
-  }
- },
- "nbformat": 4,
- "nbformat_minor": 5
-}
+import streamlit as st
+import numpy as np
+import pandas as pd
+import joblib
+
+# Load model and scaler
+model = joblib.load("best_churn_model.pkl")
+scaler = joblib.load("scaler.pkl")
+
+st.title("📊 Telco Customer Churn Prediction App")
+st.write("Enter customer details below to predict churn probability.")
+
+# Inputs (same order as X.columns)
+def user_input_features():
+    SeniorCitizen = st.selectbox("Senior Citizen", [0, 1])
+    tenure = st.number_input("Tenure (Months)", 0, 100, 12)
+    MonthlyCharges = st.number_input("Monthly Charges", 0.0, 200.0, 70.35)
+    TotalCharges = st.number_input("Total Charges", 0.0, 10000.0, 500.0)
+
+    Female = st.selectbox("Gender (Female=1, Male=0)", [0, 1])
+    Partner_Yes = st.selectbox("Partner", [0, 1])
+    Dependents_Yes = st.selectbox("Dependents", [0, 1])
+    PhoneService_Yes = st.selectbox("Phone Service", [0, 1])
+
+    MultipleLines_Yes = st.selectbox("Multiple Lines Yes", [0, 1])
+
+    InternetService_Fiber_optic = st.selectbox("Fiber Optic Internet", [0, 1])
+    InternetService_No = 0  # reference dropped
+
+    OnlineSecurity_Yes = st.selectbox("Online Security Yes", [0, 1])
+    OnlineBackup_Yes = st.selectbox("Online Backup Yes", [0, 1])
+    DeviceProtection_Yes = st.selectbox("Device Protection Yes", [0, 1])
+    TechSupport_Yes = st.selectbox("Tech Support Yes", [0, 1])
+    StreamingTV_Yes = st.selectbox("Streaming TV Yes", [0, 1])
+    StreamingMovies_Yes = st.selectbox("Streaming Movies Yes", [0, 1])
+
+    Contract_One_year = st.selectbox("Contract One Year", [0, 1])
+    Contract_Two_year = st.selectbox("Contract Two Year", [0, 1])
+
+    PaperlessBilling_Yes = st.selectbox("Paperless Billing Yes", [0, 1])
+
+    PaymentMethod_Electronic_check = st.selectbox("Electronic Check", [0, 1])
+    PaymentMethod_Mailed_check = st.selectbox("Mailed Check", [0, 1])
+    PaymentMethod_Credit_card_automatic = 0  # reference dropped
+
+    data = {
+        'SeniorCitizen': SeniorCitizen,
+        'tenure': tenure,
+        'MonthlyCharges': MonthlyCharges,
+        'TotalCharges': TotalCharges,
+        'Female': Female,
+        'Partner_Yes': Partner_Yes,
+        'Dependents_Yes': Dependents_Yes,
+        'PhoneService_Yes': PhoneService_Yes,
+        'MultipleLines_Yes': MultipleLines_Yes,
+        'InternetService_Fiber optic': InternetService_Fiber_optic,
+        'OnlineSecurity_Yes': OnlineSecurity_Yes,
+        'OnlineBackup_Yes': OnlineBackup_Yes,
+        'DeviceProtection_Yes': DeviceProtection_Yes,
+        'TechSupport_Yes': TechSupport_Yes,
+        'StreamingTV_Yes': StreamingTV_Yes,
+        'StreamingMovies_Yes': StreamingMovies_Yes,
+        'Contract_One year': Contract_One_year,
+        'Contract_Two year': Contract_Two_year,
+        'PaperlessBilling_Yes': PaperlessBilling_Yes,
+        'PaymentMethod_Electronic check': PaymentMethod_Electronic_check,
+        'PaymentMethod_Mailed check': PaymentMethod_Mailed_check
+    }
+
+    return pd.DataFrame([data])
+
+# Get user input
+input_df = user_input_features()
+
+# Scale
+scaled_input = scaler.transform(input_df)
+
+# Predict
+prediction = model.predict(scaled_input)[0]
+prob = model.predict_proba(scaled_input)[0][1]
+
+st.subheader("🔍 Prediction:")
+if prediction == 1:
+    st.error("❌ The customer is likely to CHURN")
+else:
+    st.success("✅ The customer is NOT likely to churn")
+
+st.subheader("📈 Churn Probability:")
+st.write(f"**{prob:.2f}**")
